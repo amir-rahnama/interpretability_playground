@@ -1,77 +1,60 @@
-import pandas as pd
 import numpy as np
-import tensorflow as tf
-import functools
 
-# Creates a tf feature spec from the dataframe and columns specified.
-def create_feature_spec(df, columns=None):
-    feature_spec = {}
-    if columns == None:
-        columns = df.columns.values.tolist()
-    for f in columns:
-        if df[f].dtype is np.dtype(np.int64):
-            feature_spec[f] = tf.FixedLenFeature(shape=(), dtype=tf.int64)
-        elif df[f].dtype is np.dtype(np.float64):
-            feature_spec[f] = tf.FixedLenFeature(shape=(), dtype=tf.float32)
-        else:
-            feature_spec[f] = tf.FixedLenFeature(shape=(), dtype=tf.string)
-    return feature_spec
 
-# Creates simple numeric and categorical feature columns from a feature spec and a
-# list of columns from that spec to use.
-#
-# NOTE: Models might perform better with some feature engineering such as bucketed
-# numeric columns and hash-bucket/embedding columns for categorical features.
-def create_feature_columns(columns, feature_spec, df):
-    ret = []
-    for col in columns:
-        if feature_spec[col].dtype is tf.int64 or feature_spec[col].dtype is tf.float32:
-            ret.append(tf.feature_column.numeric_column(col))
-        else:
-            ret.append(tf.feature_column.indicator_column(
-                tf.feature_column.categorical_column_with_vocabulary_list(col, list(df[col].unique()))))
-    return ret
+def predict(x, w):
+    return np.matmul(x, w)
 
-# An input function for providing input to a model from tf.Examples
-def tfexamples_input_fn(examples, feature_spec, label, mode=tf.estimator.ModeKeys.EVAL,
-                       num_epochs=None, 
-                       batch_size=64):
-    def ex_generator():
-        for i in range(len(examples)):
-            yield examples[i].SerializeToString()
-    dataset = tf.data.Dataset.from_generator(
-      ex_generator, tf.dtypes.string, tf.TensorShape([]))
-    if mode == tf.estimator.ModeKeys.TRAIN:
-        dataset = dataset.shuffle(buffer_size=2 * batch_size + 1)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.map(lambda tf_example: parse_tf_example(tf_example, label, feature_spec))
-    dataset = dataset.repeat(num_epochs)
-    return dataset
+def predict_with_bias(x, w, b):
+    return np.matmul(x, w) + b
 
-# Parses Tf.Example protos into features for the input function.
-def parse_tf_example(example_proto, label, feature_spec):
-    parsed_features = tf.parse_example(serialized=example_proto, features=feature_spec)
-    target = parsed_features.pop(label)
-    return parsed_features, target
+def rss(y, y_hat):    
+    return np.square(y_hat - y).sum()
 
-# Converts a dataframe into a list of tf.Example protos.
-def df_to_examples(df, columns=None):
-    examples = []
-    if columns == None:
-        columns = df.columns.values.tolist()
-    for index, row in df.iterrows():
-        example = tf.train.Example()
-        for col in columns:
-            if df[col].dtype is np.dtype(np.int64):
-                example.features.feature[col].int64_list.value.append(int(row[col]))
-            elif df[col].dtype is np.dtype(np.float64):
-                example.features.feature[col].float_list.value.append(row[col])
-            elif row[col] == row[col]:
-                example.features.feature[col].bytes_list.value.append(row[col].encode('utf-8'))
-        examples.append(example)
-    return examples
+def d_rss_w(y, y_hat, x):    
+    return np.sum(np.matmul(x.T, y_hat - y), axis=0)
 
-# Converts a dataframe column into a column of 0's and 1's based on the provided test.
-# Used to force label columns to be numeric for binary classification using a TF estimator.
-def make_label_column_numeric(df, label_column, test):
-  df[label_column] = np.where(test(df[label_column]), 1, 0)
+def d_rss_w_0(y, y_hat):    
+    return np.sum(y_hat - y)
+
+def synthetic_linear(data_size = 100, training_size = 60):
+    x_0 = np.ones(data_size)
+    x_1 = np.random.randint(-30, 30, data_size)
+    eps = np.random.normal(0, 10, data_size)
+
+    w_0 = -3.5
+    w_1 = 2
+
+    y = w_0 * x_0 + w_1 * x_1 + eps
+
+    x_train = np.c_[x_0[0:training_size], x_1[0:training_size]]
+    y_train = y[0:training_size]
+
+    x_test = np.c_[x_0[training_size:data_size], x_1[training_size:data_size]]
+    y_test = y[training_size:data_size]
+
+    return x_train, y_train, x_test, y_test
+
+
+def ordinary_least_squares(x_train, y_train):
+    return np.matmul(np.linalg.inv(np.matmul(x_train.T, x_train)), np.matmul(x_train.T, y_train))
+
+def squared_error(y_hat, y):
+    return np.sum(np.square(y_hat - y), axis=0)
+
+def train_gd_linear(x, y, num_steps=1000, lr=0.01):
+    _w = np.random.random(x.shape[1])   
+    _b = np.random.random(x.shape[1])
+
+    _w_trail_path = [_w]
+    _b_trail_path = [_b]
+    
+    for i in range(0, num_steps):
+        _y_hat = predict_with_bias(x, _w, _b)
+        
+        _w -= lr * d_rss_w(y, _y_hat, x) / x.shape[0]
+        _b -= lr * d_rss_w_0(y, _y_hat) / x.shape[0]
+
+        _w_trail_path.append(lr * d_rss_w(y, _y_hat, x) / x.shape[0])
+        _b_trail_path.append(lr * d_rss_w_0(y, _y_hat) / x.shape[0])
+        
+    return _w, _b, _w_trail_path, _b_trail_path
